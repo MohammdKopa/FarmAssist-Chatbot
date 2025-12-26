@@ -1,0 +1,201 @@
+{
+  "name": "FarmAssist - Simple Version",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "farm-chat",
+        "responseMode": "responseNode",
+        "options": {
+          "allowedOrigins": "*"
+        }
+      },
+      "id": "webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.body.intent }}",
+              "value2": "status",
+              "operation": "equals"
+            }
+          ]
+        }
+      },
+      "id": "check-status",
+      "name": "Is Status?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://services.sentinel-hub.com/api/v1/statistics",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"input\": {\n    \"bounds\": {\n      \"geometry\": {\n        \"type\": \"Point\",\n        \"coordinates\": [{{ $json.body.location.lng }}, {{ $json.body.location.lat }}]\n      },\n      \"properties\": {\n        \"crs\": \"http://www.opengis.net/def/crs/EPSG/0/4326\"\n      }\n    },\n    \"data\": [\n      {\n        \"type\": \"sentinel-2-l2a\",\n        \"dataFilter\": {\n          \"timeRange\": {\n            \"from\": \"{{ $now.minus({days: 30}).toISO() }}\",\n            \"to\": \"{{ $now.toISO() }}\"\n          },\n          \"maxCloudCoverage\": 30\n        }\n      }\n    ]\n  },\n  \"aggregation\": {\n    \"timeRange\": {\n      \"from\": \"{{ $now.minus({days: 30}).toISO() }}\",\n      \"to\": \"{{ $now.toISO() }}\"\n    },\n    \"aggregationInterval\": {\n      \"of\": \"P1D\"\n    },\n    \"evalscript\": \"//VERSION=3\\nfunction setup() {\\n  return {\\n    input: [{ bands: ['B04', 'B08', 'dataMask'] }],\\n    output: [{ id: 'ndvi', bands: 1 }]\\n  };\\n}\\nfunction evaluatePixel(samples) {\\n  let ndvi = (samples.B08 - samples.B04) / (samples.B08 + samples.B04);\\n  return { ndvi: [ndvi] };\\n}\"\n  }\n}"
+      },
+      "id": "sentinel-hub",
+      "name": "Get NDVI from Sentinel Hub",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [650, 200],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "YOUR_SENTINEL_HUB_OAUTH",
+          "name": "Sentinel Hub OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Process Sentinel Hub response and calculate farm health\nconst response = $input.first().json;\nconst location = $('Webhook').first().json.body.location;\nconst language = $('Webhook').first().json.body.language;\n\n// Get latest NDVI value\nlet ndvi = 0.65; // Default if no data\nlet moisture = 'Normal';\nlet health = 'Good';\nlet trend = 'Stable';\n\nif (response.data && response.data.length > 0) {\n  const latestData = response.data[response.data.length - 1];\n  if (latestData.outputs && latestData.outputs.ndvi) {\n    ndvi = latestData.outputs.ndvi.bands.B0.stats.mean || 0.65;\n  }\n}\n\n// Determine health status\nif (ndvi > 0.6) {\n  health = language === 'ar' ? 'جيدة' : 'Good';\n  moisture = language === 'ar' ? 'طبيعية' : 'Normal';\n} else if (ndvi > 0.4) {\n  health = language === 'ar' ? 'متوسطة' : 'Fair';\n  moisture = language === 'ar' ? 'منخفضة قليلاً' : 'Slightly Low';\n} else {\n  health = language === 'ar' ? 'تحتاج اهتمام' : 'Needs Attention';\n  moisture = language === 'ar' ? 'منخفضة' : 'Low';\n}\n\n// Generate tip based on NDVI\nlet tip = '';\nif (language === 'ar') {\n  if (ndvi > 0.6) {\n    tip = 'محاصيلك في حالة ممتازة! استمر في الري المنتظم.';\n  } else if (ndvi > 0.4) {\n    tip = 'قد تحتاج محاصيلك إلى مزيد من الري. راقب الأوراق بحثاً عن علامات الإجهاد.';\n  } else {\n    tip = 'تحتاج محاصيلك إلى اهتمام فوري. تحقق من الري والتسميد.';\n  }\n} else {\n  if (ndvi > 0.6) {\n    tip = 'Your crops are in excellent condition! Continue regular irrigation.';\n  } else if (ndvi > 0.4) {\n    tip = 'Your crops may need more water. Watch leaves for stress signs.';\n  } else {\n    tip = 'Your crops need immediate attention. Check irrigation and fertilization.';\n  }\n}\n\nreturn {\n  report: {\n    ndvi: parseFloat(ndvi.toFixed(2)),\n    moisture,\n    health,\n    trend,\n    tip\n  },\n  location,\n  language\n};"
+      },
+      "id": "process-data",
+      "name": "Process Satellite Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ message: $json.report.tip, report: $json.report }) }}",
+        "options": {}
+      },
+      "id": "respond-status",
+      "name": "Send Status Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1050, 200]
+    },
+    {
+      "parameters": {
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"claude-sonnet-4-20250514\",\n  \"max_tokens\": 500,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"You are a farming assistant for farmers in Syria and Nigeria. Respond in {{ $json.body.language === 'ar' ? 'Arabic' : 'English' }}. Be helpful, concise, and practical.\\n\\nUser message: {{ $json.body.message }}\"\n    }\n  ]\n}"
+      },
+      "id": "claude-chat",
+      "name": "Claude Chat",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [650, 400],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "YOUR_ANTHROPIC_HEADER_AUTH",
+          "name": "Anthropic API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ message: $json.content[0].text }) }}",
+        "options": {}
+      },
+      "id": "respond-chat",
+      "name": "Send Chat Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [850, 400]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Is Status?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Status?": {
+      "main": [
+        [
+          {
+            "node": "Get NDVI from Sentinel Hub",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Claude Chat",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get NDVI from Sentinel Hub": {
+      "main": [
+        [
+          {
+            "node": "Process Satellite Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Satellite Data": {
+      "main": [
+        [
+          {
+            "node": "Send Status Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude Chat": {
+      "main": [
+        [
+          {
+            "node": "Send Chat Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}
